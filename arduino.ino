@@ -1,11 +1,6 @@
-
-#define BLYNK_TEMPLATE_ID "TMPL6FMyZ7vFt"
-#define BLYNK_TEMPLATE_NAME "Nhung"
-#define BLYNK_AUTH_TOKEN "gAQOgfb_KeiEZ73w3eShHJ7ZKHb4Ukfy"
-#include <Wire.h>
-#define BLYNK_PRINT Serial
 #include <ESP8266WiFi.h>
-#include <BlynkSimpleEsp8266.h>
+#include <PubSubClient.h>
+#include <Wire.h>
 
 
 const int MPU_addr = 0x68;  // I2C address of the MPU-6050
@@ -19,32 +14,93 @@ byte trigger1count = 0;    //stores the counts past since trigger 1 was set true
 byte trigger2count = 0;    //stores the counts past since trigger 2 was set true
 byte trigger3count = 0;    //stores the counts past since trigger 3 was set true
 int angleChange = 0;
-// WiFi network info.
-char auth[] = "gAQOgfb_KeiEZ73w3eShHJ7ZKHb4Ukfy";  //Auth code sent via Email
-const char *ssid = "302";                          // Enter your Wi-Fi Name
-const char *pass = "66668888";                     // Enter your Wi-Fi Password
+
+// Thông tin WiFi của bạn
+const char* ssid = "Context Holder";
+const char* password = "toilakhiem";
+
+// Thông tin MQTT broker
+const char* mqtt_server = "192.168.205.214"; // Thay bằng địa chỉ IP của máy chủ Mosquitto
+const char* mqtt_topic = "fall/toppic";
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// Khai báo chân GPIO cho LED
+const int ledPin = 2; // D4 trên ESP8266
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  
+  String message;
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  Serial.println(message);
+
+  // Kiểm tra thông điệp và điều khiển LED
+  if (message == "ON") {
+    digitalWrite(ledPin, LOW); // LED bật (thường LOW là bật với ESP8266)
+  } else if (message == "OFF") {
+    digitalWrite(ledPin, HIGH); // LED tắt (thường HIGH là tắt với ESP8266)
+  }
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect("ESP8266Client")) {
+      Serial.println("connected");
+      client.subscribe("test/topic"); // Thay bằng tên topic của bạn
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
-  Blynk.begin(auth, ssid, pass);
+  pinMode(ledPin, OUTPUT);
   Wire.begin();
   Wire.beginTransmission(MPU_addr);
   Wire.write(0x6B);  // PWR_MGMT_1 register
   Wire.write(0);     // set to zero (wakes up the MPU-6050)
-  Wire.endTransmission(true);
-  Serial.println("Wrote to IMU");
-  Serial.println("Connecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, pass);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");  // print … till not connected
-  }
-  Serial.println("");
-  Serial.println("WiFi connected");
+  Wire.endTransmission(true); digitalWrite(ledPin, HIGH); // Tắt LED ban đầu
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
 }
+
 void loop() {
-  Blynk.run();
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
   mpu_read();
+  
   ax = (AcX - 2050) / 16384.00;
   ay = (AcY - 77) / 16384.00;
   az = (AcZ - 1947) / 16384.00;
@@ -54,16 +110,25 @@ void loop() {
   // calculating Amplitute vactor for 3 axis
   float Raw_Amp = pow(pow(ax, 2) + pow(ay, 2) + pow(az, 2), 0.5);
   int Amp = Raw_Amp * 10;  // Mulitiplied by 10 bcz values are between 0 to 1
+  Serial.println(fall);
   Serial.println(Amp);
+  digitalWrite(LED_BUILTIN, LOW);
   if (Amp <= 2 && trigger2 == false) {  //if AM breaks lower threshold (0.4g)
-    trigger1 = true;
+    trigger1 = true;                    // Bật đèn LED để chỉ ra rằng MPU6050 vẫn được kết nối
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(200);
+    digitalWrite(LED_BUILTIN, LOW);
     Serial.println("TRIGGER 1 ACTIVATED");
+    
+    client.publish(mqtt_topic, "TRIGGER 1 ACTIVATED");
   }
   if (trigger1 == true) {
     trigger1count++;
     if (Amp >= 12) {  //if AM breaks upper threshold (3g)
       trigger2 = true;
       Serial.println("TRIGGER 2 ACTIVATED");
+      
+      client.publish(mqtt_topic, "TRIGGER 2 ACTIVATED");
       trigger1 = false;
       trigger1count = 0;
     }
@@ -76,7 +141,9 @@ void loop() {
       trigger3 = true;
       trigger2 = false;
       trigger2count = 0;
-      Serial.println(angleChange);
+      Serial.println(angleChange);fall = true;
+      
+      client.publish(mqtt_topic, "TRIGGER 3 ACTIVATED");
       Serial.println("TRIGGER 3 ACTIVATED");
     }
   }
@@ -100,12 +167,7 @@ void loop() {
   }
   if (fall == true) {  //in event of a fall detection
     Serial.println("FALL DETECTED");
-    Blynk.virtualWrite(V0, 1000);
-    Blynk.virtualWrite(V1, 1000);
-    Blynk.virtualWrite(V2, 1000);
-    Blynk.virtualWrite(V3, 1000);
-    Blynk.virtualWrite(V4, 1000);
-    Blynk.virtualWrite(V5, 1000);
+    client.publish(mqtt_topic, "1");
     fall = false;
   }
   if (trigger2count >= 6) {  //allow 0.5s for orientation change
@@ -120,6 +182,8 @@ void loop() {
   }
   delay(100);
 }
+
+
 void mpu_read() {
   Wire.beginTransmission(MPU_addr);
   Wire.write(0x3B);  // starting with register 0x3B (ACCEL_XOUT_H)
